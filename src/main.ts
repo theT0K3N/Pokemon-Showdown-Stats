@@ -39,7 +39,7 @@ import * as fs from './fs';
 export interface Options {
   numWorkers?: number;
   batchSize?: number;
-  intermediatePath?: number;
+  checkpoints?: string;
 }
 
 export interface FormatData {

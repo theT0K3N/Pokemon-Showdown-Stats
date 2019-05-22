@@ -4,7 +4,14 @@ import {Parser, Reports, Statistics, Stats, TaggedStatistics} from 'stats';
 import {workerData} from 'worker_threads';
 
 import * as fs from './fs';
+import * as state form './state';
 import * as main from './main';
+
+interface Checkpoint {
+  begin: string;
+  end: string;
+  stats: Stats;
+}
 
 const POPULAR = new Set([
   'ou',
@@ -28,16 +35,36 @@ const CUTOFFS = {
   popular: [0, 1500, 1695, 1825],
 };
 
+const BATCH_SIZE = 1000; // TODO: What should the default for this be?
+
 const monotypes = (data: Data) => new Set(Object.keys(data.Types).map(t => `mono${toID(t)}` as ID));
 
 interface Options extends main.Options {
   reportsPath: string;
 }
 
+
 async function process(formats: main.FormatData[], options: Options) {
+  // If we are configured to use checkpoints we will check to see if a checkpoints directory
+  // already exists - if so we need to resume from the checkpoint, otherwise we need to
+  // create the checkpoint directory setup and write the checkpoints as we process the logs.
+  const batches = 
+  if (options.checkpoints) {
+    // The checkpoints directory is to be structured as follows:
+    //
+    //     <checkpoints>
+    //     └── format
+    //         └── YYYY-MM-DD
+    //             └── HHMMSS.json
+    //
+
+    // If we're checkpointing we need a batch size.
+    options.batchSize = options.batchSize || BATCH_SIZE;
+  }
+
   // All of the reports we're writing
   const writes: Array<Promise<void>> = [];
-  for (const {format, size, files} of formats) {
+  for (const [format, batches] of formats.entries()) {
     const cutoffs = POPULAR.has(format) ? CUTOFFS.popular : CUTOFFS.default;
     const data = Data.forFormat(format);
     const stats = Stats.create();
@@ -90,6 +117,42 @@ function writeReports(
   const metagame = Reports.metagameReport(stats);
   writes.push(fs.writeFile(path.resolve(reports, 'metagame', `${file}.txt`), metagame));
   return writes;
+}
+
+function writeCheckpoint(file: string, checkpoint: Checkpoint) {
+  return fs.writeGzipFile(file, JSON.stringify({
+    begin: checkpoint.begin,
+    end: checkpoint.end,
+    stats: state.serializeStats(checkpoint.stats),
+  }));
+}
+
+async function readCheckpoint(file: string) {
+  const json = JSON.stringify(await fs.readFile(file));
+  return {begin: json.begin, end: json.end, checkpoint: state.deserializeStats(json.stats))};
+}
+
+function resumeFromCheckpoint(files: string[], checkpoint?: Checkpoint, options: Options) {
+  const batches: string[][] = [];
+
+  let size = 0;
+  let batch = [];
+  for (const file of files) {
+    // TODO: We could binary search for the starting point
+    if (checkpoint && file < checkpoint.file) continue;
+    if (!options.batchSize || size < options.batchSize) {
+      // TODO: we may also decide to change batches at the start of a new day
+      batch.push(file);
+    } else {
+      batches.push(batch);
+      size = 0;
+      batch = [];
+    }
+  }
+  if (size) batches.push(batch);
+
+  const stats = options.staged || !checkpoint ? Stats.create() : checkpoint.stats;
+  return {batches, stats};
 }
 
 // tslint:disable-next-line: no-floating-promises
