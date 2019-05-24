@@ -1,5 +1,7 @@
 import * as fs from 'fs';
 import * as zlib from 'zlib';
+import * as tar from 'tar';
+import {dirname} from 'path';
 
 export function exists(path: string): Promise<boolean> {
   return new Promise((resolve, reject) => {
@@ -20,6 +22,12 @@ export function mkdir(path: string, options?: {recursive?: boolean, mode?: numbe
 export function readdir(path: string): Promise<string[]> {
   return new Promise((resolve, reject) => {
     fs.readdir(path, (err, data) => {
+      if (err && err.code === 'ENOTDIR' && path.includes('.')) {
+        tar.x({
+          cwd: dirname(path),
+          file: path,
+        }).then(_ => readdir(path.slice(0, path.indexOf('.'))).then(resolve, reject), reject);
+      }
       err ? reject(err) : resolve(data);
     });
   });

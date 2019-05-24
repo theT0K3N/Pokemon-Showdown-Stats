@@ -12,9 +12,11 @@
   "author": "Kirk Scheibelhut",
   "license": "MIT",
   "dependencies": {
-    "stats": "file:stats",
     "@types/node": "^11.13.4",
-    "ps": "file:ps"
+    "@types/tar": "^4.0.0",
+    "ps": "file:ps",
+    "stats": "file:stats",
+    "tar": "^4.4.8"
   },
   "devDependencies": {
     "gts": "^0.9.0",
