@@ -51,3 +51,18 @@ function dec(n: number) {
   if (abs < 100) return n.toFixed(1);
   return n.toFixed();
 }
+
+function humanFileSize(size: number) {
+  const i = Math.floor(Math.log(size) / Math.log(1024));
+  return `${(size / Math.pow(1024, i)).toFixed(2)} ${['B', 'kB', 'MB', 'GB', 'TB'][i]}`;
+}
+
+setInterval(() => {
+  const memory = '\n' +
+      Object.entries(process.memoryUsage()).map(e => `${e[0]}: ${humanFileSize(e[1])}`).join('\n');
+  if (workerData) {
+    log(`worker:${workerData.num}`, workerData.num, memory);
+  } else {
+    log(`main`, 0, memory);
+  }
+}, 1000);

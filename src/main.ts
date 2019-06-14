@@ -3,7 +3,8 @@ import './debug';
 
 import * as path from 'path';
 import {ID} from 'ps';
-import {Worker} from 'worker_threads';
+//import {Worker} from 'worker_threads';
+import * as worker from './workers/stats';
 
 import {Batch, Checkpoints} from './checkpoint';
 import {Configuration, Options} from './config';
@@ -59,35 +60,42 @@ async function spawn(
 
   for (const [i, formats] of batches.entries()) {
     const workerData = {type, formats, config: workerConfig, num: i + 1};
-    LOG(`Creating ${type} worker:${workerData.num} to handle ${formats.length} format(s)`);
-    workers.push(new Promise((resolve, reject) => {
-      const worker = new Worker(path.join(WORKERS, `${workerConfig.worker}.js`), {workerData});
-      worker.on('error', reject);
-      worker.on('exit', (code) => {
-        if (code === 0) {
-          LOG(`${capitalize(type)} worker:${workerData.num} exited cleanly`);
-          // We need to wait for the worker to exit before resolving (as opposed to having
-          // the worker message us when it is finished) so that we know it is safe to
-          // terminate the main process (which will kill all the workers and result in
-          // strange behavior where `console` output from the workers goes missing).
-          resolve();
-        } else {
-          reject(new Error(
-              `${capitalize(type)} worker:${workerData.num} stopped with exit code ${code}`));
-        }
-      });
-    }));
+
+    if (workerData.type === 'apply') {
+      await worker.apply(workerData.formats as Batch[], workerData.config as unknown as worker.StatsConfiguration);
+    } else {
+      await worker.combine(workerData.formats as ID[], workerData.config as unknown as worker.StatsConfiguration);
+    }
+
+    //LOG(`Creating ${type} worker:${workerData.num} to handle ${formats.length} format(s)`);
+    //workers.push(new Promise((resolve, reject) => {
+      //const worker = new Worker(path.join(WORKERS, `${workerConfig.worker}.js`), {workerData});
+      //worker.on('error', reject);
+      //worker.on('exit', (code) => {
+        //if (code === 0) {
+          //LOG(`${capitalize(type)} worker:${workerData.num} exited cleanly`);
+          //// We need to wait for the worker to exit before resolving (as opposed to having
+          //// the worker message us when it is finished) so that we know it is safe to
+          //// terminate the main process (which will kill all the workers and result in
+          //// strange behavior where `console` output from the workers goes missing).
+          //resolve();
+        //} else {
+          //reject(new Error(
+              //`${capitalize(type)} worker:${workerData.num} stopped with exit code ${code}`));
+        //}
+      //});
+    //}));
   }
 
   let failures = 0;
-  for (const worker of workers) {
-    try {
-      await worker;
-    } catch (err) {
-      console.error(err);
-      failures++;
-    }
-  }
+  //for (const worker of workers) {
+    //try {
+      //await worker;
+    //} catch (err) {
+      //console.error(err);
+      //failures++;
+    //}
+  //}
   return failures;
 }
 

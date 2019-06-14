@@ -59,7 +59,7 @@ const REPORTS = 5;
 
 const monotypes = (data: Data) => new Set(Object.keys(data.Types).map(t => `mono${toID(t)}` as ID));
 
-interface StatsConfiguration extends Configuration {
+export interface StatsConfiguration extends Configuration {
   reports: string;
 }
 
@@ -76,7 +76,7 @@ export async function init(config: StatsConfiguration) {
 export function accept(config: StatsConfiguration) {
   return (format: ID) =>
              !(format.startsWith('seasonal') || format.includes('random') ||
-               format.includes('metronome' || format.includes('superstaff')));
+               format.includes('metronome' || format.includes('superstaff') || format.includes('monotype')));
 }
 
 function mkdirs(dir: string) {
@@ -84,11 +84,12 @@ function mkdirs(dir: string) {
   return [mkdir('chaos'), mkdir('leads'), mkdir('moveset'), mkdir('metagame')];
 }
 
-async function apply(batches: Batch[], config: StatsConfiguration) {
+export async function apply(batches: Batch[], config: StatsConfiguration) {
   const logStorage = LogStorage.connect(config);
   const checkpointStorage = CheckpointStorage.connect(config);
 
   for (const {format, begin, end} of batches) {
+    if (!format.includes('monotype')) continue;
     const cutoffs = POPULAR.has(format) ? CUTOFFS.popular : CUTOFFS.default;
     const data = Data.forFormat(format);
     const stats = Stats.create();
@@ -130,7 +131,7 @@ async function processLog(
   }
 }
 
-async function combine(formats: ID[], config: StatsConfiguration) {
+export async function combine(formats: ID[], config: StatsConfiguration) {
   for (const format of formats) {
     LOG(`Combining checkpoint(s) for ${format}`);
     const stats = config.dryRun ? Stats.create() : await aggregate(config, format);
