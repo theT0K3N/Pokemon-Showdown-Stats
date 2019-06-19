@@ -33,7 +33,9 @@ export async function main(options: Options) {
     let remaining = 0;
     for (const batch of batches) {
       const bs = batchSize(batch);
-      allBatches.push({ data: batch, size: config.accept(format) * bs });
+      const accept = config.accept(format);
+      const size = (accept ? (Array.isArray(accept) ? accept.length : 1) : 0) * bs;
+      allBatches.push({ data: batch, size });
       remaining += bs;
     }
     formatSizes.set(format, { remaining, total: size });

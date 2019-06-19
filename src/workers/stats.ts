@@ -80,14 +80,18 @@ export function accept(config: StatsConfiguration) {
       format.includes('random') ||
       format.includes('metronome' || format.includes('superstaff'))
     ) {
-      return 0;
+      return false;
     } else if (format === 'gen7monotype') {
-      // Given that we compute all the monotype team tags for gen7monotype, we need to
-      // weight the format to make sure a batch uses up approximately the same amount
-      // of memory during computation compared to the other formats.
-      return MONOTYPES.size + 1;
+      const cutoffs = POPULAR.has(format) ? CUTOFFS.popular : CUTOFFS.default;
+      const shards = cutoffs.map(c => `${c}`);
+      for (const cutoff of cutoffs) {
+        for (const type of MONOTYPES) {
+          shards.push(`${cutoff}-${type}`);
+        }
+      }
+      return shards;
     } else {
-      return 1;
+      return (POPULAR.has(format) ? CUTOFFS.popular : CUTOFFS.default).map(c => `${c}`);
     }
   };
 }

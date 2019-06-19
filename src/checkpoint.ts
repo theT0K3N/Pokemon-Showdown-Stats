@@ -66,9 +66,10 @@ export const Checkpoints = new (class {
     const writes: Array<Promise<void>> = [];
     for (const raw of await logStorage.list()) {
       const format = raw as ID;
-      const weight = accept(format);
-      if (!weight) continue;
+      const shards = accept(format);
+      if (!shards) continue;
 
+      const weight = Array.isArray(shards) ? shards.length : 1;
       const checkpoints = existing.get(format);
       if (!checkpoints) writes.push(checkpointStorage.prepare(format));
       const n = Math.ceil(config.batchSize.apply / weight);
