@@ -24,26 +24,7 @@ export async function main(options: Options) {
   }
 
   LOG('Splitting formats into batches');
-  const formatGroupedBatches = await Checkpoints.restore(config, config.split);
-
-  const batchSize = (b: Batch) => b.end.index.global - b.begin.index.global + 1;
-  const allBatches: Array<{ data: Batch; size: number }> = [];
-  const formatSizes: Map<ID, { remaining: number; total: number }> = new Map();
-  for (const [format, { batches, size }] of formatBatches.entries()) {
-    let remaining = 0;
-    for (const batch of batches) {
-      const bs = batchSize(batch);
-      const split = config.split(format);
-      const size = (split ? (Array.isArray(split) ? split.length : 1) : 0) * bs;
-      allBatches.push({ data: batch, size });
-      remaining += bs;
-    }
-    formatSizes.set(format, { remaining, total: size });
-  }
-  const allSizes: Array<{ data: ID; size: number }> = [];
-  for (const [format, { size }] of formatBatches.entries()) {
-    allSizes.push({ data: format, size });
-  }
+  const [applyBatches, combineBatches, formatSizes] = await Checkpoints.restore(config, config.split);
   if (LOG()) {
     const sorted = Array.from(formatSizes.entries()).sort((a, b) => b[1].total - a[1].total);
     LOG(`\n\n${sorted.map(e => `  ${e[0]}: ${e[1].remaining}/${e[1].total}`).join('\n')}\n`);
@@ -52,36 +33,32 @@ export async function main(options: Options) {
   const workerConfig = Object.assign({}, config);
   delete workerConfig.split;
 
-  let failures = !allBatches.length
+  let failures = !applyBatches.length
     ? 0
     : await spawn(
         'apply',
         workerConfig,
         config.maxFiles,
-        partition(allBatches, Math.max(config.numWorkers.apply, 1))
+        partition(applyBatches, Math.max(config.numWorkers.apply, 1))
       );
-  // This partitioning only accounts for the number of logs handled in this processing run,
-  // which isn't necesarily equal to the size of the total logs being combined (eg. due to
-  // restarts). Given the cost of combine is generally small and that this only effects the
-  // atypical case it's not really worth bothering to try to get this to be more precise.
-  // TODO: We could be immediately creating combine workers immediately after all batches for
-  // the particular format have finished processing.
-  failures += !allSizes.length
+  failures += !combineBatches.length
     ? 0
     : await spawn(
         'combine',
         workerConfig,
         config.maxFiles,
-        partition(allSizes, Math.max(config.numWorkers.combine, 1))
+        partition(combineBatches, Math.max(config.numWorkers.combine, 1))
       );
+
   return failures;
 }
 
+type Batches = Array<GroupedBatch[]|Array<{format: ID, shard: string}>>;
 async function spawn(
   type: 'apply' | 'combine',
   workerConfig: Configuration,
   maxFiles: number,
-  batches: Array<Batch[] | ID[]>
+  batches: Batches[]; 
 ) {
   const workers: Array<Promise<void>> = [];
 
@@ -93,8 +70,7 @@ async function spawn(
       // We shuffle the batches so that formats will be processed more evenly. Without this shake
       // up, all logs for a given format will be processed at approximately the same time across
       // all workers, which can lead to issues if a format is more expensive to process than others.
-      // NOTE: This is really Batch[]|ID[] but Typescript is too dumb to realize thats still T[]...
-      RANDOM.shuffle(formats as Array<Batch | ID>);
+      RANDOM.shuffle(formats as Batches);
       const workerData = { type, formats, config: workerConfig, num: i + 1 };
       LOG(`Creating ${type} worker:${workerData.num} to handle ${formats.length} batch(es)`);
       workers.push(
@@ -126,7 +102,7 @@ async function spawn(
   } else {
     const worker = await import(path.join(WORKERS, `${workerConfig.worker}.js`));
     for (const [i, formats] of batches.entries()) {
-      workers.push(worker[type](RANDOM.shuffle(formats as Array<Batch | ID>), workerConfig));
+      workers.push(worker[type](RANDOM.shuffle(formats as Batches), workerConfig));
     }
   }
 

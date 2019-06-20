@@ -126,11 +126,9 @@ class CheckpointFileStorage implements CheckpointStorage {
     const reads = [];
     for (const raw of await fs.readdir(this.dir)) {
       const format = raw as ID;
-      reads.push(
-        this.list(format).then(batches => {
-          checkpoints.set(format, batches);
-        })
-      );
+      this.list(format).then(batches => {
+        checkpoints.set(format, batches);
+      })
     }
     await Promise.all(reads);
     return checkpoints;

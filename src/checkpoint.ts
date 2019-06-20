@@ -66,40 +66,54 @@ export abstract class Checkpoint implements Batch {
 }
 
 export const Checkpoints = new (class {
-  async restore(config: Configuration, accept: (format: ID) => number) {
+  async restore(config: Configuration, split: (format: ID) => number) {
     const logStorage = LogStorage.connect(config);
     const checkpointStorage = CheckpointStorage.connect(config);
+    
+    const existing: Map<ID, Map<string, Batch[]>> = await checkpointStorage.offsets();
 
-    const formats: Map<ID, <string, { batches: Batch[]; size: number }>> = new Map();
-    const existing: Map<ID, <string, Batch[]>> = await checkpointStorage.offsets();
-
-    const reads: Array<Promise<void>> = [];
+    const reads: Array<Promise<{format: ID, shard: string, batches: Batch[], size: number>> = [];
     const writes: Array<Promise<void>> = [];
     const n = config.batchSize.apply;
     for (const raw of await logStorage.list()) {
       const format = raw as ID;
-      const a = accept(format);
-      if (!a) continue;
+      const result = split(format);
+      if (!result) continue;
 
-      const shards = Array.isArray(a) ? a : [a];
+      const shards = result === true ? [''] : result.shard;
+
       const sharded = existing.get(format);
       if (!sharded) writes.push(checkpointStorage.prepare(format, shards));
 
-      const restored = new Map();
       for (const shard of shards) {
         const checkpoints = !sharded ? undefined : sharded.get(shard);
         if (!checkpoints) writes.push(checkpointStorage.prepare(format, [shard]));
         reads.push(
-          restore(logStorage, n, format, shard, checkpoints || []).then(data => {
-            restored.set(shard, data);
-          })
-        );
+          restore(logStorage, n, format, shard, checkpoints || []).then(data =>
+            ({format, shard, batches: data.batches, size: data.size})));
       }
-      formats.set(format, restored);
     }
 
-    await Promise.all([...reads, ...writes]);
-    return formats;
+    const result = await Promise.all(reads);
+    const [applyBatches, remaining] = groupBatches(result, config.group);
+    const combineBatches: Array<{data: {format: ID, shard: string}, size: number}> = [];
+    const formatSizes: Map<ID, {remaining: number, total: number} = new Map();
+    for (const {format, shard, batches, size} of result) {
+      combineBatches.push({ data: {format, shard}, size});
+      let formatSize = formatSizes.get(format);
+      if (!formatSize) {
+        formatSize = {remaining: 0, total: 0};
+      }
+      const rem = remaining.get(format);
+      if (rem) {
+        const r = rem.get(shard);
+        if (r) formatSize.remaining = Math.max(formatSize.remaining, r);
+      }
+      formatSize.total = size;
+    }
+
+    await Promise.all(writes);
+    return [applyBatches, combineBatches, formatSizes];
   }
 
   formatOffsets(begin: Offset, end: Offset) {
@@ -212,7 +226,7 @@ function chunk(
   const batches: Batch[] = [];
   finish = Math.min(typeof finish === 'number' ? finish : logs.length, logs.length);
   if (start >= finish) return batches;
-  const lastSize = last ? last.end.index.global - last.begin.index.global + 1 : 0;
+  const lastSize = last ? batchSize(last) : 0;
 
   // If the last batch wasn't complete, we'll try to add to it provided we can make a
   // contiguous range (not always possible in the face of errors or config changes).
@@ -248,4 +262,50 @@ function chunk(
   batches.push({ format, shard, begin, end });
 
   return batches;
+}
+
+function groupBatches(shards: Array<{format: ID, shard: string, batches: Batch[]}>, group: number) {
+  const expanded: Map<ID, Array<{batch: Batch, shard: string}>> = new Map();
+  const remaining: Map<ID, Map<string, number>> = new Map();
+
+  for (const {format, shard, batches} of shards) {
+    const {format, shard, batches} = data;
+
+    let exp = expanded.get(format);
+    if (!exp) {
+      exp = new Map();
+      expanded.set(format, exp);
+    } 
+    let e = exp.get(shard);
+    if (!e) {
+      e = [];
+      exp.set(shard, e);
+    }
+
+    e.push(batches.map(batch => ({batch, shard})));
+    let rem = remaining.get(format);
+    if (!rem) {
+      rem = new Map();
+      remaining.set(format, rem);
+    }
+    rem.set(shard, Math.max(rem.get(shard) || 0), batches.reduce((tot, b) => tot + batchSize(b), 0));
+  }
+
+  const applyBatches: Array<{data: GroupedBatch, size: number}> = [];
+  for (const batches of expanded.values()) {
+    applyBatches.push(...groupShards(batches, group));
+  }
+  return [applyBatches, remaining];
+}
+
+function groupShards(shards: Array<{batch: Batch, shard: string}, group: number) {
+  const groupedBatches: Array<{data: GroupedBatch, size: number}> = [];
+  shards.sort((a, b) => 
+
+
+
+}
+
+function batchSize(b: Batch) {
+  return b.end.index.global - b.begin.index.global + 1;
 }
