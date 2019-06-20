@@ -11,18 +11,25 @@ export interface Offset {
 
 export interface Batch {
   format: ID;
-  shard: string;
   begin: Offset;
   end: Offset;
+  shard?: string;
+}
+
+export GroupedBatch {
+  format: ID;
+  begin: Offset;
+  end: Offset;
+  shards?: string[];
 }
 
 export abstract class Checkpoint implements Batch {
   readonly format: ID;
-  readonly shard: string;
   readonly begin: Offset;
   readonly end: Offset;
+  readonly shard?: string;
 
-  constructor(format: ID, shard: string, begin: Offset, end: Offset) {
+  constructor(format: ID, begin: Offset, end: Offset, shard?: string) {
     this.format = format;
     this.begin = begin;
     this.end = end;

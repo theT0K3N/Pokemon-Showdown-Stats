@@ -3,7 +3,7 @@ import '../debug';
 
 import * as path from 'path';
 import { Data, ID, toID } from 'ps';
-import { Parser, Reports, Statistics, Stats, TaggedStatistics } from 'stats';
+import { Parser, Reports, Statistics, Stats } from 'stats';
 import { workerData } from 'worker_threads';
 
 import { Batch, Checkpoint, Checkpoints, Offset } from '../checkpoint';
@@ -12,10 +12,10 @@ import * as fs from '../fs';
 import { CheckpointStorage, LogStorage } from '../storage';
 
 class StatsCheckpoint extends Checkpoint {
-  readonly stats: TaggedStatistics;
+  readonly stats: Statistics;
 
-  constructor(format: ID, begin: Offset, end: Offset, stats: TaggedStatistics) {
-    super(format, begin, end);
+  constructor(format: ID, shard: string, begin: Offset, end: Offset, stats: Statistics) {
+    super(format, begin, end, shard);
     this.stats = stats;
   }
 
@@ -23,10 +23,10 @@ class StatsCheckpoint extends Checkpoint {
     return JSON.stringify(this.stats);
   }
 
-  static async read(storage: CheckpointStorage, format: ID, begin: Offset, end: Offset) {
-    const serialized = await storage.read(format, begin, end);
+  static async read(storage: CheckpointStorage, format: ID, shard: string, begin: Offset, end: Offset) {
+    const serialized = await storage.read(format, shard, begin, end);
     const stats = JSON.parse(serialized);
-    return new StatsCheckpoint(format, begin, end, stats);
+    return new StatsCheckpoint(format, shard, begin, end, stats);
   }
 }
 
@@ -48,9 +48,13 @@ const POPULAR = new Set([
 ] as ID[]);
 
 const CUTOFFS = {
-  default: [0, 1500, 1630, 1760],
-  popular: [0, 1500, 1695, 1825],
+  default: ['0', '1500', '1630', '1760'],
+  popular: ['0', '1500', '1695', '1825'],
 };
+
+// By default we group all the cutoff shards together (ie. compute all the cutoffs as part
+// of a single batch). This means that for all but gen7monotype we read each log file only once.
+const GROUP = 4;
 
 // The number of report files written by `writeReports` (usage, leads, moveset, chaos, metagame).
 const REPORTS = 5;
@@ -61,6 +65,7 @@ const MONOTYPES = new Set(
 
 interface StatsConfiguration extends Configuration {
   reports: string;
+  group?: number;
 }
 
 export async function init(config: StatsConfiguration) {
@@ -73,25 +78,28 @@ export async function init(config: StatsConfiguration) {
   await Promise.all([...mkdirs(config.reports), ...mkdirs(monotype)]);
 }
 
-export function accept(config: StatsConfiguration) {
+// split(config: StatsConfiguration): boolean | {shards: string[], group: number}
+export function split(config: StatsConfiguration) {
   return (format: ID) => {
     if (
       format.startsWith('seasonal') ||
       format.includes('random') ||
-      format.includes('metronome' || format.includes('superstaff'))
+      format.includes('metronome') || 
+      format.includes('superstaff')
     ) {
-      return false;
+      return false; // skip
     } else if (format === 'gen7monotype') {
       const cutoffs = POPULAR.has(format) ? CUTOFFS.popular : CUTOFFS.default;
-      const shards = cutoffs.map(c => `${c}`);
+      const shards = cutoffs.slice();
       for (const cutoff of cutoffs) {
         for (const type of MONOTYPES) {
           shards.push(`${cutoff}-${type}`);
         }
       }
-      return shards;
+      return { shards, group: config.group || GROUP };
     } else {
-      return (POPULAR.has(format) ? CUTOFFS.popular : CUTOFFS.default).map(c => `${c}`);
+      const shards = (POPULAR.has(format) ? CUTOFFS.popular : CUTOFFS.default).slice();
+      return { shards, group: config.group || GROUP };
     }
   };
 }
@@ -101,16 +109,26 @@ function mkdirs(dir: string) {
   return [mkdir('chaos'), mkdir('leads'), mkdir('moveset'), mkdir('metagame')];
 }
 
-async function apply(batches: Batch[], config: StatsConfiguration) {
+// apply(batches: Batch[]|GroupedBatch[], config: StatsConfiguration): void
+async function apply(batches: GroupedBatch[], config: StatsConfiguration) {
   const logStorage = LogStorage.connect(config);
   const checkpointStorage = CheckpointStorage.connect(config);
 
-  for (const [i, { format, begin, end }] of batches.entries()) {
-    const cutoffs = POPULAR.has(format) ? CUTOFFS.popular : CUTOFFS.default;
+  for (const [i, { format, begin, end, shards }] of batches.entries()) {
     const data = Data.forFormat(format);
-    const stats = { total: {}, tags: {} };
 
-    const size = end.index.global - begin.index.global + 1;
+    // Figure out which shards we're going to be updating
+    const state: Array<{cutoff: number, tag?: ID, stats: Statistics}> = [];
+    for (const shard of shards) {
+      const [cutoff, tag] = shard.split('-');
+      state.push({
+        cutoff: Number(cutoff),
+        tag: tag ? tag as ID : undefined,
+        stats: Stats.create(),
+      });
+    }
+
+    // Actually process the logs, updating state accordingly
     const offset = `${format}: ${Checkpoints.formatOffsets(begin, end)}`;
     LOG(`Processing ${size} log(s) from batch ${i + 1}/${batches.length} - ${offset}`);
     let processed: Array<Promise<void>> = [];
@@ -121,15 +139,30 @@ async function apply(batches: Batch[], config: StatsConfiguration) {
         processed = [];
       }
 
-      processed.push(processLog(logStorage, data, log, cutoffs, stats, config.dryRun));
+      processed.push(processLog(logStorage, data, log, state, config.dryRun));
     }
     if (processed.length) {
       LOG(`Waiting for ${processed.length} log(s) from ${format} to be parsed`);
       await Promise.all(processed);
     }
-    const checkpoint = new StatsCheckpoint(format, begin, end, stats);
-    LOG(`Writing checkpoint <${checkpoint}>`);
-    await checkpointStorage.write(checkpoint);
+
+    // Write checkpoints for each shard that we've computed
+    let writes = [];
+    for (const {cutoff, tag, stats} of state) {
+      if (writes.length >= config.maxFiles) {
+        LOG(`Waiting for ${writes.length} checkpoints(s) from ${format} to be written`);
+        await Promise.all(writes);
+        writes [];
+      }
+      const shard = tag ? `${cutoff}-${tag}` : `${cutoff}`;
+      const checkpoint = new StatsCheckpoint(format, shard, begin, end, stats);
+      LOG(`Writing checkpoint <${checkpoint}>`);
+      writes.push(checkpointStorage.write(checkpoint));
+    }
+    if (writes.length) {
+      LOG(`Waiting for ${writes.length} checkpoints(s) from ${format} to be written`);
+      await Promise.all(writes);
+    }
     MLOG(true);
   }
 }
@@ -138,8 +171,7 @@ async function processLog(
   logStorage: LogStorage,
   data: Data,
   log: string,
-  cutoffs: number[],
-  stats: TaggedStatistics,
+  state: Array<{cutoff: number, tag?: ID, stats: Statistics}>,
   dryRun?: boolean
 ) {
   VLOG(`Processing ${log}`);
@@ -147,49 +179,41 @@ async function processLog(
   try {
     const raw = JSON.parse(await logStorage.read(log));
     const battle = Parser.parse(raw, data);
-    const tags = data.format === 'gen7monotype' ? MONOTYPES : undefined;
-    Stats.updateTagged(data, battle, cutoffs, stats, tags);
+    for (const {cutoff, tag, stats} of state) {
+      VLOG(`Updating ${cutoff}${tag ? tag : ''} stats for ${log}`);
+      Stats.update(data, battle, cutoff, stats, tag);
+    }
   } catch (err) {
     console.error(`${log}: ${err.message}`);
   }
 }
 
-async function combine(formats: ID[], config: StatsConfiguration) {
-  for (const format of formats) {
-    LOG(`Combining checkpoint(s) for ${format}`);
-    const stats = config.dryRun ? { total: {}, tags: {} } : await aggregate(config, format);
-
-    let writes = [];
-    for (const [c, s] of Object.entries(stats.total)) {
-      if (writes.length + REPORTS >= config.maxFiles) {
-        LOG(`Waiting for ${writes.length} report(s) for ${format} to be written`);
-        await Promise.all(writes);
-        writes = [];
-      }
-      writes.push(...writeReports(config, format, Number(c), s));
-    }
-
-    for (const [t, ts] of Object.entries(stats.tags)) {
-      for (const [c, s] of Object.entries(ts)) {
-        if (writes.length + REPORTS >= config.maxFiles) {
-          LOG(`Waiting for ${writes.length} report(s) for ${format} to be written`);
-          await Promise.all(writes);
-          writes = [];
-        }
-        writes.push(...writeReports(config, format, Number(c), s, t as ID));
-      }
-    }
-    if (writes.length) {
-      LOG(`Waiting for ${writes.length} report(s) for ${format} to be written`);
+// combine(shards: {format: ID, shard?: string}, config: StatsConfiguration): void
+async function combine(shards: Array<{format: ID, shard: string}>, config: StatsConfiguration) {
+  let writes = [];
+  for (const {format, shard} of shards) {
+    if (writes.length + REPORTS >= config.maxFiles) {
+      LOG(`Waiting for ${writes.length} report(s) to be written`);
       await Promise.all(writes);
+      writes = [];
+      MLOG(true);
     }
+    LOG(`Combining checkpoint(s) for ${format} (${shard})`);
+    const stats = config.dryRun ? Stats.create() : await aggregate(config, format, shard);
+    const [cutoff, tag] = shard.split('-');
+
+    writes.push(...writeReports(config, format, Number(cutoff), shards, tag ? tag as ID : undefined));
+  }
+  if (writes.length) {
+    LOG(`Waiting for ${writes.length} report(s) for to be written`);
+    await Promise.all(writes);
     MLOG(true);
   }
 }
 
-async function aggregate(config: StatsConfiguration, format: ID): Promise<TaggedStatistics> {
+async function aggregate(config: StatsConfiguration, format: ID, shard: string): Promise<Statistics> {
   const checkpointStorage = CheckpointStorage.connect(config);
-  const stats = { total: {}, tags: {} };
+  const stats = Stats.create();
   // Floating point math is commutative but *not* necessarily associative, meaning that we can
   // potentially get different results depending on the order we add the Stats in. The sorting
   // CheckpointStorage#list *could* be used to help with stability, but we are letting the reads
@@ -201,27 +225,27 @@ async function aggregate(config: StatsConfiguration, format: ID): Promise<Tagged
   let n = 0;
   let combines = [];
   const N = Math.min(config.maxFiles, config.batchSize.combine);
-  const checkpoints = await checkpointStorage.list(format);
+  const checkpoints = await checkpointStorage.list(format, shard);
   const size = checkpoints.length;
   for (const [i, { begin, end }] of checkpoints.entries()) {
     if (n >= N) {
-      LOG(`Waiting for ${combines.length}/${size} checkpoint(s) for ${format} to be aggregated`);
+      LOG(`Waiting for ${combines.length}/${size} checkpoint(s) for ${format} (${shard}) to be aggregated`);
       await Promise.all(combines);
       n = 0;
       combines = [];
     }
 
     combines.push(
-      StatsCheckpoint.read(checkpointStorage, format, begin, end).then(checkpoint => {
+      StatsCheckpoint.read(checkpointStorage, format, shard, begin, end).then(checkpoint => {
         LOG(`Aggregating checkpoint ${i + 1}/${size} <${checkpoint}>`);
-        Stats.combineTagged(stats, checkpoint.stats);
+        Stats.combine(stats, checkpoint.stats);
         MLOG(true);
       })
     );
     n++;
   }
   if (combines.length) {
-    LOG(`Waiting for ${combines.length} checkpoint(s) for ${format} to be aggregated`);
+    LOG(`Waiting for ${combines.length} checkpoint(s) for ${format} (${shard}) to be aggregated`);
     await Promise.all(combines);
   }
   MLOG(true);

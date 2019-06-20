@@ -24,7 +24,7 @@ export async function main(options: Options) {
   }
 
   LOG('Splitting formats into batches');
-  const formatBatches = await Checkpoints.restore(config, config.accept);
+  const formatGroupedBatches = await Checkpoints.restore(config, config.split);
 
   const batchSize = (b: Batch) => b.end.index.global - b.begin.index.global + 1;
   const allBatches: Array<{ data: Batch; size: number }> = [];
@@ -33,8 +33,8 @@ export async function main(options: Options) {
     let remaining = 0;
     for (const batch of batches) {
       const bs = batchSize(batch);
-      const accept = config.accept(format);
-      const size = (accept ? (Array.isArray(accept) ? accept.length : 1) : 0) * bs;
+      const split = config.split(format);
+      const size = (split ? (Array.isArray(split) ? split.length : 1) : 0) * bs;
       allBatches.push({ data: batch, size });
       remaining += bs;
     }
@@ -50,7 +50,7 @@ export async function main(options: Options) {
   }
 
   const workerConfig = Object.assign({}, config);
-  delete workerConfig.accept;
+  delete workerConfig.split;
 
   let failures = !allBatches.length
     ? 0
@@ -72,7 +72,7 @@ export async function main(options: Options) {
         'combine',
         workerConfig,
         config.maxFiles,
-        partition(allSizes, Math.max(config.numWorkers.combine, 1), config.uneven)
+        partition(allSizes, Math.max(config.numWorkers.combine, 1))
       );
   return failures;
 }
@@ -153,13 +153,12 @@ async function init(options: Options) {
   config.checkpoints = checkpoints;
   const worker = await import(path.join(WORKERS, `${config.worker}.js`));
   if (worker.init) await worker.init(config);
-  if (worker.accept) config.accept = worker.accept(config);
+  if (worker.split) config.split = worker.split(config);
   return config;
 }
 
 // https://en.wikipedia.org/wiki/Partition_problem#The_greedy_algorithm
-function partition<T>(batches: Array<{ data: T; size: number }>, partitions: number, uneven = 1) {
-  const unmsg = uneven === 1 ? '' : ` (uneven=${uneven})`;
+function partition<T>(batches: Array<{ data: T; size: number }>, partitions: number) {
   LOG(`Partitioning ${batches.length} batches into ${partitions} partitions${unmsg}`);
   batches.sort((a, b) => b.size - a.size);
   const total = batches.reduce((tot, b) => tot + b.size, 0);
@@ -168,11 +167,6 @@ function partition<T>(batches: Array<{ data: T; size: number }>, partitions: num
   const ps: Array<{ total: number; data: T[] }> = [];
   for (const batch of batches) {
     let min: { total: number; data: T[] } | undefined;
-    if (ps.length && batch.size / total > uneven) {
-      ps[0].total += batch.size;
-      ps[0].data.push(batch.data);
-      continue;
-    }
     if (ps.length < partitions) {
       ps.push({ total: batch.size, data: [batch.data] });
       continue;

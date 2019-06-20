@@ -87,7 +87,7 @@ function usage(code) {
   out('');
   out('   -v/--verbose: log output while processing (default: false)');
   out('');
-  out('   -u/--uneven=N: fraction which determines which formats can be combined concurrently (default: 1/numWorkers)');
+  out('   -g/--group=N: group N shards to processed by a single apply worker');
   out('');
   out('   -a/--all: include all checks and counters in moveset reports (default: false)');
   out('');
@@ -110,7 +110,7 @@ const argv = require('minimist')(process.argv.slice(2), {
     batchSize: ['b', 'perBatch', 'maxBatch', 'maxBatchSize'],
     debug: ['v', 'verbose'],
     dryRun: ['d', 'dry'],
-    uneven: ['u'],
+    group: ['g'],
     all: ['a'],
     formats: ['f', 'anon', 'anonymize'],
   }
