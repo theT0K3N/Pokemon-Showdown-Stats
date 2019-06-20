@@ -59,25 +59,30 @@ export const Checkpoints = new (class {
     const logStorage = LogStorage.connect(config);
     const checkpointStorage = CheckpointStorage.connect(config);
 
-    const formats: Map<ID, { batches: Batch[]; size: number }> = new Map();
-    const existing: Map<ID, Batch[]> = await checkpointStorage.offsets();
+    const formats: Map<ID, <string, { batches: Batch[]; size: number }>> = new Map();
+    const existing: Map<ID, <string, Batch[]>> = await checkpointStorage.offsets();
 
     const reads: Array<Promise<void>> = [];
     const writes: Array<Promise<void>> = [];
+    const n = config.batchSize.apply;
     for (const raw of await logStorage.list()) {
       const format = raw as ID;
-      const shards = accept(format);
-      if (!shards) continue;
+      const a = accept(format);
+      if (!a) continue;
 
-      const weight = Array.isArray(shards) ? shards.length : 1;
-      const checkpoints = existing.get(format);
-      if (!checkpoints) writes.push(checkpointStorage.prepare(format));
-      const n = Math.ceil(config.batchSize.apply / weight);
-      reads.push(
-        restore(logStorage, n, format, checkpoints || []).then(data => {
-          formats.set(format, data);
-        })
-      );
+      const shards = Array.isArray(a) ? a : [a];
+      const sharded = existing.get(format);
+      if (!sharded) writes.push(checkpointStorage.prepare(format, shards));
+
+      for (const shard of shards) {
+        const checkpoints = !sharded ? undefined : sharded.get(shard);
+        if (!checkpoints) writes.push(checkpointStorage.prepare(format, shard));
+        reads.push(
+          restore(logStorage, n, format, checkpoints || []).then(data => {
+            formats.set(format, data);
+          })
+        );
+      }
     }
 
     await Promise.all([...reads, ...writes]);
