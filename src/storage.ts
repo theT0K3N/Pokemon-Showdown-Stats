@@ -72,10 +72,10 @@ class LogFileStorage implements LogStorage {
 
 export interface CheckpointStorage {
   init(): Promise<string>;
-  prepare(format: ID): Promise<void>;
-  list(format: ID): Promise<Batch[]>;
-  offsets(): Promise<Map<ID, Batch[]>>;
-  read(format: ID, begin: Offset, end: Offset): Promise<string>;
+  prepare(format: ID, shards?: string[]): Promise<void>;
+  list(format: ID, shard?: string): Promise<Batch[]>;
+  offsets(): Promise<Map<ID, Map<string, Batch[]>>>;
+  read(format: ID, shard: string, begin: Offset, end: Offset): Promise<string>;
   write(checkpoint: Checkpoint): Promise<void>;
 }
 
@@ -103,26 +103,26 @@ class CheckpointFileStorage implements CheckpointStorage {
     if (!this.dir) {
       this.dir = await fs.mkdtemp('checkpoints-');
     } else {
-      try {
-        await fs.mkdir(this.dir, { recursive: true });
-      } catch (err) {
-        if (err.code !== 'EEXIST') throw err;
-      }
+      await fs.mkdir(this.dir, { recursive: true });
     }
     return this.dir;
   }
 
-  async prepare(format: ID) {
-    return fs.mkdir(path.resolve(this.dir, format));
+  async prepare(format: ID, shards: string[]) {
+    const dirs = [];
+    for (const shard of shards) {
+      dirs.push(fs.mkdir(path.resolve(this.dir, format, shard), { recursive: true }));
+    }
+    await Promise.all(dirs);
   }
 
-  async list(format: ID) {
+  async list(format: ID, shard?: string) {
     const filenames = (await fs.readdir(path.resolve(this.dir, format))).sort(CMP);
     return filenames.map(name => this.fromName(format, name));
   }
 
   async offsets() {
-    const checkpoints: Map<ID, Batch[]> = new Map();
+    const checkpoints: Map<ID, Map<string, Batch[]>> = new Map();
     const reads = [];
     for (const raw of await fs.readdir(this.dir)) {
       const format = raw as ID;
@@ -136,26 +136,27 @@ class CheckpointFileStorage implements CheckpointStorage {
     return checkpoints;
   }
 
-  read(format: ID, begin: Offset, end: Offset) {
-    return fs.readFile(this.toName(format, begin, end), 'utf8');
+  read(format: ID, shard: string, begin: Offset, end: Offset) {
+    return fs.readFile(this.toName(format, shard, begin, end), 'utf8');
   }
 
   write(checkpoint: Checkpoint) {
-    const filename = this.toName(checkpoint.format, checkpoint.begin, checkpoint.end);
+    const filename = this.toName(checkpoint.format, checkpoint.shard, checkpoint.begin, checkpoint.end);
     return fs.writeGzipFile(filename, checkpoint.serialize());
   }
 
-  private toName(format: ID, begin: Offset, end: Offset) {
+  private toName(format: ID, shard: string, begin: Offset, end: Offset) {
     const b = Checkpoint.encodeOffset(begin);
     const e = Checkpoint.encodeOffset(end);
-    return path.resolve(this.dir, format, `${b}-${e}.json.gz`);
+    return path.resolve(this.dir, format, shard, `${b}-${e}.json.gz`);
   }
 
-  private fromName(format: ID, filename: string) {
+  private fromName(format: ID, shard: string, filename: string) {
     filename = path.basename(filename, '.json.gz');
     const [b, e] = filename.split('-');
     return {
       format,
+      shard,
       begin: Checkpoint.decodeOffset(format, b),
       end: Checkpoint.decodeOffset(format, e),
     };

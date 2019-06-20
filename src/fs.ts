@@ -26,7 +26,7 @@ export function mkdir(
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     fs.mkdir(path, Object.assign({ mode: 0o755 }, options), err => {
-      err ? reject(err) : resolve();
+      err && err.code !== 'EEXISTS' ? reject(err) : resolve();
     });
   });
 }

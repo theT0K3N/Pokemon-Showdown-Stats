@@ -11,19 +11,22 @@ export interface Offset {
 
 export interface Batch {
   format: ID;
+  shard: string;
   begin: Offset;
   end: Offset;
 }
 
 export abstract class Checkpoint implements Batch {
   readonly format: ID;
+  readonly shard: string;
   readonly begin: Offset;
   readonly end: Offset;
 
-  constructor(format: ID, begin: Offset, end: Offset) {
+  constructor(format: ID, shard: string, begin: Offset, end: Offset) {
     this.format = format;
     this.begin = begin;
     this.end = end;
+    this.shard = shard;
   }
 
   abstract serialize(): string;
@@ -50,7 +53,8 @@ export abstract class Checkpoint implements Batch {
   }
 
   toString() {
-    return `${this.format}: ${Checkpoints.formatOffsets(this.begin, this.end)}`;
+    const shard = this.shard ? ` (${this.shard})` : '';
+    return `${this.format}${shard}: ${Checkpoints.formatOffsets(this.begin, this.end)}`;
   }
 }
 
@@ -74,15 +78,17 @@ export const Checkpoints = new (class {
       const sharded = existing.get(format);
       if (!sharded) writes.push(checkpointStorage.prepare(format, shards));
 
+      const restored = new Map();
       for (const shard of shards) {
         const checkpoints = !sharded ? undefined : sharded.get(shard);
-        if (!checkpoints) writes.push(checkpointStorage.prepare(format, shard));
+        if (!checkpoints) writes.push(checkpointStorage.prepare(format, [shard]));
         reads.push(
-          restore(logStorage, n, format, checkpoints || []).then(data => {
-            formats.set(format, data);
+          restore(logStorage, n, format, shard, checkpoints || []).then(data => {
+            restored.set(shard, data);
           })
         );
       }
+      formats.set(format, restored);
     }
 
     await Promise.all([...reads, ...writes]);
@@ -97,7 +103,7 @@ export const Checkpoints = new (class {
   }
 })();
 
-async function restore(logStorage: LogStorage, n: number, format: ID, offsets: Batch[] = []) {
+async function restore(logStorage: LogStorage, n: number, format: ID, shard: string, offsets: Batch[] = []) {
   const batches: Batch[] = [];
 
   let o = 0;
@@ -106,7 +112,7 @@ async function restore(logStorage: LogStorage, n: number, format: ID, offsets: B
   for (const day of await logStorage.list(format)) {
     const logs = await logStorage.list(format, day);
 
-    const restored = restoreDay(format, day, logs, n, size, offsets, o, last);
+    const restored = restoreDay(format, shard, day, logs, n, size, offsets, o, last);
     batches.push(...restored.batches);
     o = restored.o;
     last = restored.last;
@@ -118,6 +124,7 @@ async function restore(logStorage: LogStorage, n: number, format: ID, offsets: B
 
 function restoreDay(
   format: ID,
+  shard: string,
   day: string,
   logs: string[],
   n: number,
@@ -152,7 +159,7 @@ function restoreDay(
       // end of the day.
       const start =
         o > 0 && offsets[o - 1].end.day === day ? offsets[o - 1].end.index.local + 1 : 0;
-      batches.push(...chunk(format, day, logs, n, index, last, start, offset.begin.index.local));
+      batches.push(...chunk(format, shard, day, logs, n, index, last, start, offset.begin.index.local));
       // Given we end a the beginning of the checkpoint we need to unset last to make
       // sure we don't try to extend *through* offset on the next iteration.
       last = undefined;
@@ -170,7 +177,7 @@ function restoreDay(
     }
   }
 
-  const latest = chunk(format, day, logs, n, index, last, i);
+  const latest = chunk(format, shard, day, logs, n, index, last, i);
   // last may have been mutated by chunk ('extended'), so even if we dont add to
   // batches it should still reflect the last batch correctly.
   if (latest.length) {
@@ -185,6 +192,7 @@ function restoreDay(
 // between local indices into the logs array begin (inclusive) and finish (exclusive)
 function chunk(
   format: ID,
+  shard: string,
   day: string,
   logs: string[],
   n: number,
@@ -221,7 +229,7 @@ function chunk(
   let i = start + n - 1;
   for (; i < finish - 1; i += n) {
     const end = { day, log: logs[i], index: { local: i, global: index + i } };
-    batches.push({ format, begin, end });
+    batches.push({ format, shard, begin, end });
     begin = {
       day,
       log: logs[i + 1],
@@ -230,7 +238,7 @@ function chunk(
   }
   i = finish - 1;
   const end = { day, log: logs[i], index: { local: i, global: index + i } };
-  batches.push({ format, begin, end });
+  batches.push({ format, shard, begin, end });
 
   return batches;
 }
